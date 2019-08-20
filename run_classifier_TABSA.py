@@ -9,7 +9,7 @@ import collections
 import logging
 import os
 import random
-
+import torchnet as tnt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -21,17 +21,32 @@ from tqdm import tqdm, trange
 import tokenization
 from modeling import BertConfig, BertForSequenceClassification
 from optimization import BERTAdam
-from processor import (Semeval_NLI_B_Processor, Semeval_NLI_M_Processor,
-                       Semeval_QA_B_Processor, Semeval_QA_M_Processor,
-                       Semeval_single_Processor, Sentihood_NLI_B_Processor,
-                       Sentihood_NLI_M_Processor, Sentihood_QA_B_Processor,
-                       Sentihood_QA_M_Processor, Sentihood_single_Processor)
+from processor import DataProcessor
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
 
+class InputExample(object):
+    """A single training/test example for simple sequence classification."""
+
+    def __init__(self, guid, text_a, text_b=None, label=None):
+        """Constructs a InputExample.
+
+        Args:
+            guid: Unique id for the example.
+            text_a: string. The untokenized text of the first sequence. For single
+            sequence tasks, only this sequence must be specified.
+            text_b: (Optional) string. The untokenized text of the second sequence.
+            Only must be specified for sequence pair tasks.
+            label: (Optional) string. The label of the example. This should be
+            specified for train and dev examples, but not for test examples.
+        """
+        self.guid = guid
+        self.text_a = text_a
+        self.text_b = text_b
+        self.label = label
 
 class InputFeatures(object):
     """A single set of features of data."""
@@ -43,91 +58,53 @@ class InputFeatures(object):
         self.label_id = label_id
 
 
-def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
-    """Loads a data file into a list of `InputBatch`s."""
-
+def convert_example_to_feature(example, label_list, max_seq_length, tokenizer):
     label_map = {}
     for (i, label) in enumerate(label_list):
         label_map[label] = i
+    tokens_a = tokenizer.tokenize(example.text_a)
+    tokens_b = None
+    if example.text_b:
+        tokens_b = tokenizer.tokenize(example.text_b)
 
-    features = []
-    for (ex_index, example) in enumerate(tqdm(examples)):
-        tokens_a = tokenizer.tokenize(example.text_a)
-
-        tokens_b = None
-        if example.text_b:
-            tokens_b = tokenizer.tokenize(example.text_b)
-
-        if tokens_b:
-            # Modifies `tokens_a` and `tokens_b` in place so that the total
-            # length is less than the specified length.
-            # Account for [CLS], [SEP], [SEP] with "- 3"
-            _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
-        else:
-            # Account for [CLS] and [SEP] with "- 2"
-            if len(tokens_a) > max_seq_length - 2:
-                tokens_a = tokens_a[0:(max_seq_length - 2)]
-
-        # The convention in BERT is:
-        # (a) For sequence pairs:
-        #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-        #  type_ids: 0   0  0    0    0     0       0 0    1  1  1  1   1 1
-        # (b) For single sequences:
-        #  tokens:   [CLS] the dog is hairy . [SEP]
-        #  type_ids: 0   0   0   0  0     0 0
-        #
-        # Where "type_ids" are used to indicate whether this is the first
-        # sequence or the second sequence. The embedding vectors for `type=0` and
-        # `type=1` were learned during pre-training and are added to the wordpiece
-        # embedding vector (and position vector). This is not *strictly* necessary
-        # since the [SEP] token unambigiously separates the sequences, but it makes
-        # it easier for the model to learn the concept of sequences.
-        #
-        # For classification tasks, the first vector (corresponding to [CLS]) is
-        # used as as the "sentence vector". Note that this only makes sense because
-        # the entire model is fine-tuned.
-        tokens = []
-        segment_ids = []
-        tokens.append("[CLS]")
+    if tokens_b:
+        _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
+    else:
+        if len(tokens_a) > max_seq_length - 2:
+            tokens_a = tokens_a[0:(max_seq_length - 2)]
+    tokens = []
+    segment_ids = []
+    tokens.append("[CLS]")
+    segment_ids.append(0)
+    for token in tokens_a:
+        tokens.append(token)
         segment_ids.append(0)
-        for token in tokens_a:
+    tokens.append("[SEP]")
+    segment_ids.append(0)
+
+    if tokens_b:
+        for token in tokens_b:
             tokens.append(token)
-            segment_ids.append(0)
+            segment_ids.append(1)
         tokens.append("[SEP]")
+        segment_ids.append(1)
+
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    input_mask = [1] * len(input_ids)
+
+    while len(input_ids) < max_seq_length:
+        input_ids.append(0)
+        input_mask.append(0)
         segment_ids.append(0)
 
-        if tokens_b:
-            for token in tokens_b:
-                tokens.append(token)
-                segment_ids.append(1)
-            tokens.append("[SEP]")
-            segment_ids.append(1)
+    assert len(input_ids) == max_seq_length
+    assert len(input_mask) == max_seq_length
+    assert len(segment_ids) == max_seq_length
 
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    label_id = label_map[example.label]
+    feature = InputFeatures(input_ids=input_ids,input_mask=input_mask,segment_ids=segment_ids,label_id=label_id)
+    return feature
 
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1] * len(input_ids)
-
-        # Zero-pad up to the sequence length.
-        while len(input_ids) < max_seq_length:
-            input_ids.append(0)
-            input_mask.append(0)
-            segment_ids.append(0)
-
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
-
-        label_id = label_map[example.label]
-
-        features.append(
-                InputFeatures(
-                        input_ids=input_ids,
-                        input_mask=input_mask,
-                        segment_ids=segment_ids,
-                        label_id=label_id))
-    return features
 
 
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
@@ -155,9 +132,7 @@ def main():
                         default=None,
                         type=str,
                         required=True,
-                        choices=["sentihood_single", "sentihood_NLI_M", "sentihood_QA_M", \
-                                "sentihood_NLI_B", "sentihood_QA_B", "semeval_single", \
-                                "semeval_NLI_M", "semeval_QA_M", "semeval_NLI_B", "semeval_QA_B"],
+                        choices=["NLI_M", "QA_M", "NLI_B", "QA_B"],
                         help="The name of the task to train.")
     parser.add_argument("--data_dir",
                         default=None,
@@ -278,66 +253,62 @@ def main():
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
 
+    sentiment_label = {"-2":"未提及", "0":"中性", "1":"正面", "-1":"负面"}
 
     # prepare dataloaders
-    processors = {
-        "sentihood_single":Sentihood_single_Processor,
-        "sentihood_NLI_M":Sentihood_NLI_M_Processor,
-        "sentihood_QA_M":Sentihood_QA_M_Processor,
-        "sentihood_NLI_B":Sentihood_NLI_B_Processor,
-        "sentihood_QA_B":Sentihood_QA_B_Processor,
-        "semeval_single":Semeval_single_Processor,
-        "semeval_NLI_M":Semeval_NLI_M_Processor,
-        "semeval_QA_M":Semeval_QA_M_Processor,
-        "semeval_NLI_B":Semeval_NLI_B_Processor,
-        "semeval_QA_B":Semeval_QA_B_Processor,
-    }
+    processor = DataProcessor(args.data_dir,args.task_name,sentiment_label)
 
-    processor = processors[args.task_name]()
     label_list = processor.get_labels()
 
-    tokenizer = tokenization.FullTokenizer(
+    tokenizer = tokenization.ch_Tokenizer(
         vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
 
     # training set
-    train_examples = None
-    num_train_steps = None
-    train_examples = processor.get_train_examples(args.data_dir)
-    num_train_steps = int(
-        len(train_examples) / args.train_batch_size * args.num_train_epochs)
+    def load_func(line,load_mode = 'train'):
+        data = line.strip().split('\t')
+        guid = "%s-%s"% (load_mode, data[0])
+        text_a = tokenization.convert_to_unicode(data[2])
+        text_b = tokenization.convert_to_unicode(data[3])
+        label = tokenization.convert_to_unicode(data[1])
+        example = InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+        feature = convert_example_to_feature(example, label_list, args.max_seq_length, tokenizer)
+        return feature
 
-    train_features = convert_examples_to_features(
-        train_examples, label_list, args.max_seq_length, tokenizer)
+    def load_func_train(line):
+        result = load_func(line,load_mode = 'train')
+        return result
+
+    def load_func_test(line):
+        result = load_func(line,load_mode='test')
+        return result
+
+    def batchify(batch):
+        all_input_ids = torch.tensor([f.input_ids for f in batch], dtype=torch.long)
+        all_input_mask = torch.tensor([f.input_mask for f in batch], dtype=torch.long)
+        all_segment_ids = torch.tensor([f.segment_ids for f in batch], dtype=torch.long)
+        all_label_ids = torch.tensor([f.label_id for f in batch], dtype=torch.long)
+
+        return [all_input_ids, all_input_mask, all_segment_ids, all_label_ids]
+
+    train_path = processor.get_train_path()
+    test_path = processor.get_test_path()
+
+    train_data = tnt.dataset.ListDataset(train_path, load_func_train)
+
+    num_train_steps = int(
+        len(train_data) / args.train_batch_size * args.num_train_epochs)
+
+
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_examples))
     logger.info("  Batch size = %d", args.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
 
-    all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-    all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-    all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-
-    train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_data)
     else:
         train_sampler = DistributedSampler(train_data)
-    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
-
-    # test set
-    if args.eval_test:
-        test_examples = processor.get_test_examples(args.data_dir)
-        test_features = convert_examples_to_features(
-            test_examples, label_list, args.max_seq_length, tokenizer)
-
-        all_input_ids = torch.tensor([f.input_ids for f in test_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in test_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in test_features], dtype=torch.long)
-        all_label_ids = torch.tensor([f.label_id for f in test_features], dtype=torch.long)
-
-        test_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-        test_dataloader = DataLoader(test_data, batch_size=args.eval_batch_size, shuffle=False)
+    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=batchify)
 
 
     # model and optimizer
@@ -399,6 +370,8 @@ def main():
         
         # eval_test
         if args.eval_test:
+            test_dataset = tnt.dataset.ListDataset(test_path, load_func_test)
+            test_dataloader = DataLoader(dataset=test_dataset, batch_size=args.eval_batch_size, collate_fn=batchify, shuffle=False)
             model.eval()
             test_loss, test_accuracy = 0, 0
             nb_test_steps, nb_test_examples = 0, 0

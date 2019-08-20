@@ -1,0 +1,14 @@
+CUDA_VISIBLE_DEVICES=1 python ch_run_modify.py \
+--task_name QA_B \
+--data_dir /absa/bert_absa_data/ \
+--vocab_file //Model/Bert/resource/bert-base-chinese/vocab.txt \
+--bert_config_file //Model/Bert/resource/bert-base-chinese/bert_config.json \
+--init_checkpoint //Model/Bert/resource/bert-base-chinese/pytorch_model.bin \
+--eval_test \
+--do_lower_case \
+--max_seq_length 300 \
+--train_batch_size 8 \
+--learning_rate 2e-5 \
+--num_train_epochs 6.0 \
+--output_dir results/meituan/QA_B \
+--seed 42
